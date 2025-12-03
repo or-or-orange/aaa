@@ -90,7 +90,7 @@ def train_tree_model(config: dict, preprocessor, X_train, y_train, X_val, y_val,
     # Train tree
     tree_trainer = TreeModelTrainer(config)
 
-    # ✅ 将numpy数组转换为DataFrame
+    # ✅ 统一转换为DataFrame（只在这里转换一次）
     feature_names = preprocessor.get_feature_names()
     X_train_df = pd.DataFrame(X_train, columns=feature_names)
     X_val_df = pd.DataFrame(X_val, columns=feature_names)
@@ -105,7 +105,6 @@ def train_tree_model(config: dict, preprocessor, X_train, y_train, X_val, y_val,
     # Save tree model
     save_dir = Path(config['system']['checkpoint']['save_dir'])
     tree_trainer.save(str(save_dir / 'tree_model.txt'))
-
     logger.info("Tree model training completed")
 
     # Extract rules
@@ -119,9 +118,15 @@ def train_tree_model(config: dict, preprocessor, X_train, y_train, X_val, y_val,
         all_rules = rule_extractor.extract_rules_from_trees(tree_trainer, X_train_df, y_train)
         logger.info(f"Extracted {len(all_rules)} rules from trees")
 
-        # ✅ 修改：select_top_rules 会内部设置 self.selected_rules
+        # Select top rules
         rule_extractor.select_top_rules(X_train_df, y_train)
         logger.info(f"Selected {len(rule_extractor.selected_rules)} high-quality rules")
+
+        # ✅ 保护：如果没有规则通过筛选
+        if len(rule_extractor.selected_rules) == 0:
+            logger.warning("No rules passed selection criteria, using top 100 rules")
+            rule_extractor.selected_rules = all_rules[:min(100, len(all_rules))]
+            logger.info(f"Fallback: using {len(rule_extractor.selected_rules)} rules")
 
         cross_train = rule_extractor.generate_cross_features(X_train_df)
         cross_val = rule_extractor.generate_cross_features(X_val_df)
@@ -138,21 +143,19 @@ def train_tree_model(config: dict, preprocessor, X_train, y_train, X_val, y_val,
         cross_train = np.zeros((len(X_train), 0))
         cross_val = np.zeros((len(X_val), 0))
 
-    # Extract paths (使用numpy数组即可)
+    # Extract paths
     if config['tree']['extract_paths']:
         logger.info("Extracting tree paths...")
-
         path_encoder = PathEncoder(config)
 
+        # ✅ 直接使用已有的DataFrame
         path_tokens_train, path_lengths_train, leaf_indices_train = \
-            path_encoder.extract_paths(tree_trainer, X_train)
-
+            path_encoder.extract_paths(tree_trainer, X_train_df)
         path_tokens_val, path_lengths_val, leaf_indices_val = \
-            path_encoder.extract_paths(tree_trainer, X_val)
+            path_encoder.extract_paths(tree_trainer, X_val_df)
 
         # Save path encoder
         path_encoder.save(str(save_dir / 'path_encoder.pkl'))
-
         logger.info(f"Path vocabulary size: {path_encoder.get_vocab_size()}")
     else:
         max_path_len = config['tree']['max_path_length']
