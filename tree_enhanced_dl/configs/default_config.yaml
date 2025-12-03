@@ -1,0 +1,206 @@
+# ============================================================================
+# Tree-Enhanced Deep Learning Configuration
+# ============================================================================
+
+# Data Configuration
+data:
+  train_path: "/gpool/home/wanghongyang/WangHY/WYY/tree_enhanced_dl/data/processed/train.csv"
+  val_path: "/gpool/home/wanghongyang/WangHY/WYY/tree_enhanced_dl/data/processed/val.csv"
+  test_path: "/gpool/home/wanghongyang/WangHY/WYY/tree_enhanced_dl/data/processed/test.csv"
+  target_column: "label"
+  
+  # Feature types
+  numerical_features: ['age', 'duration', 'campaign', 'pdays', 'previous', 'emp.var.rate', 'cons.price.idx', 'cons.conf.idx', 'euribor3m', 'nr.employed']
+  categorical_features: ['job', 'marital', 'education', 'default', 'housing', 'loan', 'contact', 'month', 'day_of_week', 'poutcome']
+  
+  # Preprocessing
+  missing_value_strategy: "median"  # median, mean, mode, constant
+  numerical_normalization: "standard"  # standard, minmax, robust
+  categorical_encoding: "ordinal"  # ordinal, onehot, target
+  
+  # Imbalance handling
+  class_weights: "balanced"  # balanced, custom, null
+  sampling_strategy: "class_balanced"  # none, oversample, undersample, class_balanced
+
+# Tree Module Configuration
+tree:
+  framework: "lightgbm"  # lightgbm, xgboost, catboost
+  
+  # Tree hyperparameters
+  n_estimators: 100
+  max_depth: 6
+  learning_rate: 0.1
+  num_leaves: 31
+  min_child_samples: 20
+  
+  # Rule extraction
+  extract_rules: true
+  rule_selection:
+    top_k: 50
+    min_gain: 0.01
+    min_coverage: 0.01
+    max_redundancy: 0.8  # mutual information threshold
+  
+  # Path extraction
+  extract_paths: true
+  max_path_length: 10
+  path_token_type: "condition_value"  # condition_value, condition_only
+
+# Model Architecture Configuration
+model:
+  # Embedding dimensions
+  embedding:
+    categorical_dim: 16
+    numerical_dim: 8
+    cross_feature_dim: 16
+    path_token_dim: 32
+    leaf_dim: 16
+    
+  # Sequence encoder
+  sequence_encoder:
+    type: "bilstm"  # bilstm, transformer, gru
+    hidden_dim: 64
+    num_layers: 2
+    dropout: 0.2
+    
+    # Transformer specific
+    num_heads: 4
+    feedforward_dim: 128
+  
+  # Fusion module
+  fusion:
+    type: "multi_head_attention"  # multi_head_attention, concat, gated
+    attention_heads: 4
+    attention_dropout: 0.1
+    
+  # MLP head
+  mlp:
+    hidden_dims: [128, 64]
+    activation: "relu"  # relu, gelu, silu
+    dropout: 0.3
+    use_batch_norm: true
+    use_residual: true
+
+# Loss Configuration
+loss:
+  # Inner losses
+  inner:
+    ce_weight: 1.0
+    contrastive_weight: 0.5
+    contrastive_type: "supcon"  # supcon, center, triplet
+    temperature: 0.07
+    
+  # Outer losses
+  outer:
+    auc_weight: 0.3
+    focal_weight: 0.5
+    focal_gamma: 2.0
+    focal_alpha: 0.25
+    
+  # Dynamic weighting
+  dynamic_weighting:
+    enabled: true
+    method: "uncertainty"  # uncertainty, gradnorm, none
+    
+  # Warm-up strategy
+  warmup:
+    enabled: true
+    warmup_epochs: 5
+    contrastive_start_epoch: 3
+    auc_start_epoch: 5
+
+# Training Configuration
+training:
+  batch_size: 256
+  num_epochs: 100
+  
+  # Optimizer
+  optimizer:
+    type: "adamw"  # adam, adamw, sgd
+    lr: 0.001
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    
+  # Scheduler
+  scheduler:
+    type: "cosine"  # cosine, step, plateau, onecycle
+    warmup_steps: 1000
+    min_lr: 1.0e-6
+    
+  # Regularization
+  regularization:
+    embedding_dropout: 0.1
+    path_dropout: 0.15
+    gradient_clip: 1.0
+    
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 15
+    metric: "pr_auc"  # auc, pr_auc, f1
+    mode: "max"
+
+# Evaluation Configuration
+evaluation:
+  metrics:
+    - "auc"
+    - "pr_auc"
+    - "f1"
+    - "ks"
+    - "ece"
+  
+  # Interpretation
+  interpretation:
+    enabled: true
+    top_k_rules: 10
+    attention_threshold: 0.05
+    generate_plots: true
+
+# Deployment Configuration
+deployment:
+  # Model optimization
+  tree_pruning:
+    enabled: true
+    min_tree_importance: 0.01
+    max_trees: 50
+    
+  path_optimization:
+    max_path_length: 8
+    cache_frequent_rules: true
+    cache_size: 1000
+    
+  # Inference
+  batch_inference: true
+  inference_batch_size: 512
+  
+  # Monitoring
+  monitoring:
+    track_rule_coverage: true
+    track_attention_drift: true
+    retrain_threshold:
+      auc_drop: 0.05
+      coverage_drop: 0.1
+
+# System Configuration
+system:
+  seed: 42
+  device: "cuda"  # cuda, cpu, mps
+  num_workers: 4
+  pin_memory: true
+  
+  # Logging
+  logging:
+    level: "INFO"
+    log_dir: "logs"
+    tensorboard: true
+    wandb:
+      enabled: false
+      project: "tree_enhanced_dl"
+      entity: null
+  
+  # Checkpointing
+  checkpoint:
+    save_dir: "checkpoints"
+    save_best: true
+    save_last: true
+    save_frequency: 5  # epochs
