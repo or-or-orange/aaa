@@ -83,22 +83,28 @@ def load_data(config: dict, logger):
     
     return preprocessor, (X_train, y_train), (X_val, y_val), (X_test, y_test)
 
-
 def train_tree_model(config: dict, preprocessor, X_train, y_train, X_val, y_val, logger):
     """Train tree model and extract features"""
     logger.info("Training tree model...")
 
     # Train tree
     tree_trainer = TreeModelTrainer(config)
+
+    # ✅ 将numpy数组转换为DataFrame
+    feature_names = preprocessor.get_feature_names()
+    X_train_df = pd.DataFrame(X_train, columns=feature_names)
+    X_val_df = pd.DataFrame(X_val, columns=feature_names)
+
+    # 使用DataFrame训练
     tree_trainer.fit(
-        X_train, y_train,
-        X_val, y_val,
-        categorical_features=preprocessor.categorical_features,
+        X_train_df, y_train,
+        X_val_df, y_val,
+        categorical_features=[],
     )
 
     # Save tree model
     save_dir = Path(config['system']['checkpoint']['save_dir'])
-    tree_trainer.save(str(save_dir / 'tree_model.txt'))  # ✅ 已修复
+    tree_trainer.save(str(save_dir / 'tree_model.txt'))
 
     logger.info("Tree model training completed")
 
@@ -108,20 +114,17 @@ def train_tree_model(config: dict, preprocessor, X_train, y_train, X_val, y_val,
 
     if config['tree']['extract_rules']:
         logger.info("Extracting cross features...")
-
         rule_extractor = RuleExtractor(config)
 
-        # ✅ 必须先提取规则
-        all_rules = rule_extractor.extract_rules_from_trees(tree_trainer, X_train, y_train)
+        all_rules = rule_extractor.extract_rules_from_trees(tree_trainer, X_train_df, y_train)
         logger.info(f"Extracted {len(all_rules)} rules from trees")
 
-        # ✅ 然后选择top规则
-        selected_rules = rule_extractor.select_top_rules(X_train, y_train)
-        logger.info(f"Selected {len(selected_rules)} high-quality rules")
+        # ✅ 修改：select_top_rules 会内部设置 self.selected_rules
+        rule_extractor.select_top_rules(X_train_df, y_train)
+        logger.info(f"Selected {len(rule_extractor.selected_rules)} high-quality rules")
 
-        # ✅ 最后生成交叉特征
-        cross_train = rule_extractor.generate_cross_features(X_train)
-        cross_val = rule_extractor.generate_cross_features(X_val)
+        cross_train = rule_extractor.generate_cross_features(X_train_df)
+        cross_val = rule_extractor.generate_cross_features(X_val_df)
 
         # Save rule extractor
         rule_extractor.save(str(save_dir / 'rule_extractor.pkl'))
@@ -135,7 +138,7 @@ def train_tree_model(config: dict, preprocessor, X_train, y_train, X_val, y_val,
         cross_train = np.zeros((len(X_train), 0))
         cross_val = np.zeros((len(X_val), 0))
 
-    # Extract paths
+    # Extract paths (使用numpy数组即可)
     if config['tree']['extract_paths']:
         logger.info("Extracting tree paths...")
 
@@ -184,29 +187,35 @@ def train_tree_model(config: dict, preprocessor, X_train, y_train, X_val, y_val,
 
 
 def create_datasets(
-    preprocessor,
-    X_train, y_train, tree_features_train,
-    X_val, y_val, tree_features_val,
-    X_test, y_test,
-    config,
-    path_encoder,
-    logger,
+        preprocessor, X_train, y_train, tree_features_train,
+        X_val, y_val, tree_features_val,
+        X_test, y_test, config, path_encoder, logger,
 ):
     """Create PyTorch datasets"""
     logger.info("Creating datasets...")
-    
-    # Get feature indices
-    num_features = preprocessor.numerical_features
-    cat_features = preprocessor.categorical_features
-    
+
+    # ✅ 修改：获取特征索引
     all_features = preprocessor.get_feature_names()
+    num_features = preprocessor.numerical_features
+    cat_features = preprocessor.original_categorical_features  # 使用原始类别特征名
+
+    # 计算特征索引
     numerical_indices = [i for i, f in enumerate(all_features) if f in num_features]
     categorical_indices = [i for i, f in enumerate(all_features) if f in cat_features]
-    
+
+    logger.info(f"Numerical indices: {len(numerical_indices)}")
+    logger.info(f"Categorical indices: {len(categorical_indices)}")
+
+    # ✅ 获取类别特征的基数
+    categorical_cardinalities = preprocessor.get_categorical_cardinalities()
+
     # Create datasets
     train_dataset = TreeEnhancedDataset(
-        X_train, y_train, tree_features_train,
-        numerical_indices, categorical_indices,
+        X_train, y_train,
+        tree_features_train,
+        numerical_indices,
+        categorical_indices,
+        path_encoder.get_vocab_size() if path_encoder else 0,
     )
     
     val_dataset = TreeEnhancedDataset(
@@ -245,37 +254,39 @@ def create_datasets(
     )
     
     logger.info(f"Created dataloaders: train={len(train_loader)}, val={len(val_loader)}")
-    
-    return train_loader, val_loader, test_loader, numerical_indices, categorical_indices
+
+    return train_loader, val_loader, test_loader, categorical_cardinalities
 
 
 def create_model(config, preprocessor, tree_features, path_encoder, device, logger):
     """Create and initialize model"""
     logger.info("Creating model...")
-    
-    # Get dimensions
+
+    # ✅ 修改点1：获取特征数量
     num_numerical = len(preprocessor.numerical_features)
-    num_categorical = len(preprocessor.categorical_features)
-    
-    # Get categorical cardinalities
-    categorical_cardinalities = []
-    if num_categorical > 0:
-        for feat in preprocessor.categorical_features:
-            if feat in preprocessor.feature_stats.get('categorical_stats', {}):
-                n_unique = preprocessor.feature_stats['categorical_stats'][feat]['n_unique']
-                categorical_cardinalities.append(n_unique)
-            else:
-                categorical_cardinalities.append(10)  # Default
-    
+    num_categorical = len(preprocessor.original_categorical_features)  # 改这里
+
+    # ✅ 修改点2：获取类别特征的基数
+    categorical_cardinalities = preprocessor.get_categorical_cardinalities()  # 改这里
+
     # Get tree dimensions
     num_rules = tree_features['cross_features'].shape[1]
     path_vocab_size = path_encoder.get_vocab_size() if path_encoder else 1
     num_trees = config['tree']['n_estimators']
     num_leaves_per_tree = config['tree']['num_leaves']
-    
-    # Create model
-    model = ModelFactory.create_model(
-        config=config,
+
+    logger.info(f"Model dimensions:")
+    logger.info(f"  Numerical features: {num_numerical}")
+    logger.info(f"  Categorical features: {num_categorical}")
+    logger.info(f"  Categorical cardinalities: {categorical_cardinalities}")
+    logger.info(f"  Cross features: {num_rules}")
+    logger.info(f"  Path vocab size: {path_vocab_size}")
+
+    # ✅ 修改点3：创建并初始化模型
+    from models.tree_enhanced_model import TreeEnhancedModel
+    model = TreeEnhancedModel(config)
+
+    model.initialize_model(
         num_numerical=num_numerical,
         num_categorical=num_categorical,
         categorical_cardinalities=categorical_cardinalities,
@@ -285,15 +296,15 @@ def create_model(config, preprocessor, tree_features, path_encoder, device, logg
         num_leaves_per_tree=num_leaves_per_tree,
         num_classes=2,
     )
-    
+
     model = model.to(device)
-    
+
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
+
     logger.info(f"Model created: {total_params:,} total params, {trainable_params:,} trainable")
-    
+
     return model
 
 
@@ -393,13 +404,11 @@ def main(args):
             train_tree_model(config, preprocessor, X_train, y_train, X_val, y_val, logger)
         
         # Create datasets and dataloaders
-        train_loader, val_loader, test_loader, numerical_indices, categorical_indices = \
-            create_datasets(
-                preprocessor, X_train, y_train, tree_features_train,
-                X_val, y_val, tree_features_val,
-                X_test, y_test,
-                config, path_encoder, logger
-            )
+        train_loader, val_loader, test_loader, categorical_cardinalities = create_datasets(
+            preprocessor, X_train, y_train, tree_features_train,
+            X_val, y_val, tree_features_val,
+            X_test, y_test, config, path_encoder, logger,
+        )
         
         # Create model
         model = create_model(
