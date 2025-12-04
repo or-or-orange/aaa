@@ -5,6 +5,7 @@ Handles missing values, encoding, normalization, and feature engineering
 
 import numpy as np
 import pandas as pd
+import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder, LabelEncoder
@@ -17,308 +18,207 @@ logger = logging.getLogger(__name__)
 
 class DataPreprocessor:
     """
-    Unified data preprocessor for numerical and categorical features
+    Data preprocessor with Label Encoding for categorical features
     """
-    
-    def __init__(self, config: Dict[str, Any]):
+
+    def __init__(self, config: Dict):
         """
         Args:
-            config: Configuration dictionary containing preprocessing parameters
+            config: Configuration dictionary
         """
         self.config = config
-        self.numerical_features = config['data']['numerical_features']
-        self.categorical_features = config['data']['categorical_features']
-        self.target_column = config['data']['target_column']
-        
-        # Preprocessing components
-        self.numerical_imputer = None
-        self.categorical_imputer = None
-        self.numerical_scaler = None
-        self.categorical_encoder = None
-        self.label_encoder = None
-        
-        # Feature statistics
+        self.data_config = config['data']
+
+        # Encoders
+        self.label_encoders = {}  # {feature_name: LabelEncoder}
+        self.target_encoder = None
+        self.scaler = StandardScaler()
+
+        # Feature information
+        self.numerical_features = []
+        self.categorical_features = []
+        self.original_categorical_features = []  # 保存原始类别特征名
+        self.feature_names = []
+        self.categorical_cardinalities = []  # 每个类别特征的唯一值数量
+
+        # Statistics
         self.feature_stats = {}
-        self.is_fitted = False
-        
-    def fit(self, df: pd.DataFrame) -> 'DataPreprocessor':
+
+    def fit_transform(
+            self,
+            df: pd.DataFrame
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Fit preprocessing components on training data
-        
-        Args:
-            df: Training dataframe
-            
-        Returns:
-            self
-        """
-        logger.info("Fitting data preprocessor...")
-        
-        # Separate features and target
-        # print(self.target_column)
-        # print(df.columns)
-        # exit()
-        X = df.drop(columns=[self.target_column])
-        y = df[self.target_column]
-        
-        # Fit numerical preprocessing
-        if self.numerical_features:
-            self._fit_numerical(X[self.numerical_features])
-            
-        # Fit categorical preprocessing
-        if self.categorical_features:
-            self._fit_categorical(X[self.categorical_features])
-            
-        # Fit label encoder
-        self.label_encoder = LabelEncoder()
-        self.label_encoder.fit(y)
-        
-        # Store feature statistics
-        self._compute_feature_stats(X, y)
-        
-        self.is_fitted = True
-        logger.info("Data preprocessor fitted successfully")
-        
-        return self
-    
-    def transform(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray]:
-        """
-        Transform data using fitted preprocessors
-        
+        Fit preprocessor and transform data
+
         Args:
             df: Input dataframe
-            
+
         Returns:
-            Tuple of (transformed features, encoded labels)
+            X: Transformed features (numpy array)
+            y: Transformed labels (numpy array)
         """
-        if not self.is_fitted:
-            raise ValueError("Preprocessor must be fitted before transform")
-        
+        logger.info("Fitting preprocessor...")
+
         # Separate features and target
-        X = df.drop(columns=[self.target_column])
-        y = df[self.target_column]
-        
-        # Transform numerical features
-        X_transformed = X.copy()
-        if self.numerical_features:
-            X_transformed[self.numerical_features] = self._transform_numerical(
+        target_col = self.data_config['target_column']
+        X = df.drop(columns=[target_col]).copy()
+        y = df[target_col].copy()
+
+        # Identify feature types
+        self.numerical_features = X.select_dtypes(
+            include=[np.number]
+        ).columns.tolist()
+
+        self.categorical_features = X.select_dtypes(
+            include=['object', 'category']
+        ).columns.tolist()
+
+        self.original_categorical_features = self.categorical_features.copy()
+
+        logger.info(f"Found {len(self.numerical_features)} numerical features")
+        logger.info(f"Found {len(self.categorical_features)} categorical features")
+
+        # ✅ 核心修改：Label Encoding for categorical features
+        for col in self.categorical_features:
+            le = LabelEncoder()
+            # 处理缺失值
+            X[col] = X[col].fillna('missing')
+            X[col] = le.fit_transform(X[col].astype(str))
+            self.label_encoders[col] = le
+
+            # 记录类别数量（用于后续embedding）
+            self.categorical_cardinalities.append(len(le.classes_))
+
+            logger.info(f"Encoded categorical feature '{col}': {len(le.classes_)} categories")
+
+        # 处理数值特征的缺失值
+        for col in self.numerical_features:
+            X[col] = X[col].fillna(X[col].median())
+
+        # 标准化数值特征
+        if len(self.numerical_features) > 0:
+            X[self.numerical_features] = self.scaler.fit_transform(
                 X[self.numerical_features]
             )
-            
-        # Transform categorical features
-        if self.categorical_features:
-            X_transformed[self.categorical_features] = self._transform_categorical(
-                X[self.categorical_features]
-            )
-            
-        # Encode labels
-        y_encoded = self.label_encoder.transform(y)
-        
-        return X_transformed, y_encoded
-    
-    def fit_transform(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray]:
+
+        # ✅ 重要：更新特征列表（现在所有特征都是数值型）
+        # 保持原始顺序：数值特征 + 编码后的类别特征
+        self.feature_names = self.numerical_features + self.original_categorical_features
+
+        # 编码目标变量
+        if y.dtype == 'object' or y.dtype.name == 'category':
+            self.target_encoder = LabelEncoder()
+            y = self.target_encoder.fit_transform(y.astype(str))
+            logger.info(f"Encoded target: {self.target_encoder.classes_}")
+        else:
+            y = y.values
+
+        # 计算统计信息
+        self._compute_statistics(X, y)
+
+        # 转换为numpy数组（按正确的列顺序）
+        X = X[self.feature_names].values
+
+        logger.info(f"Preprocessing completed: X.shape={X.shape}, y.shape={y.shape}")
+
+        return X, y
+
+    def transform(
+            self,
+            df: pd.DataFrame
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Fit and transform in one step
-        
+        Transform new data using fitted preprocessor
+
         Args:
             df: Input dataframe
-            
+
         Returns:
-            Tuple of (transformed features, encoded labels)
+            X: Transformed features
+            y: Transformed labels
         """
-        self.fit(df)
-        return self.transform(df)
-    
-    def _fit_numerical(self, X_num: pd.DataFrame) -> None:
-        """Fit numerical feature preprocessing"""
-        # Missing value imputation
-        strategy = self.config['data']['missing_value_strategy']
-        if strategy in ['mean', 'median', 'most_frequent', 'constant']:
-            self.numerical_imputer = SimpleImputer(strategy=strategy)
-            self.numerical_imputer.fit(X_num)
-        
-        # Normalization
-        X_imputed = self.numerical_imputer.transform(X_num) if self.numerical_imputer else X_num
-        
-        norm_type = self.config['data']['numerical_normalization']
-        if norm_type == 'standard':
-            self.numerical_scaler = StandardScaler()
-        elif norm_type == 'minmax':
-            self.numerical_scaler = MinMaxScaler()
-        elif norm_type == 'robust':
-            self.numerical_scaler = RobustScaler()
-        
-        if self.numerical_scaler:
-            self.numerical_scaler.fit(X_imputed)
-            
-        logger.info(f"Fitted numerical preprocessing: {len(self.numerical_features)} features")
-    
-    def _transform_numerical(self, X_num: pd.DataFrame) -> pd.DataFrame:
-        """Transform numerical features"""
-        X_transformed = X_num.copy()
-        
-        # Impute
-        if self.numerical_imputer:
-            X_transformed = pd.DataFrame(
-                self.numerical_imputer.transform(X_transformed),
-                columns=X_num.columns,
-                index=X_num.index
+        target_col = self.data_config['target_column']
+        X = df.drop(columns=[target_col]).copy()
+        y = df[target_col].copy()
+
+        # Transform categorical features
+        for col in self.original_categorical_features:
+            X[col] = X[col].fillna('missing')
+            # ✅ 处理未见过的类别
+            X[col] = X[col].astype(str).apply(
+                lambda x: x if x in self.label_encoders[col].classes_ else 'missing'
             )
-        
-        # Scale
-        if self.numerical_scaler:
-            X_transformed = pd.DataFrame(
-                self.numerical_scaler.transform(X_transformed),
-                columns=X_num.columns,
-                index=X_num.index
+            X[col] = self.label_encoders[col].transform(X[col])
+
+        # Transform numerical features
+        for col in self.numerical_features:
+            X[col] = X[col].fillna(X[col].median())
+
+        if len(self.numerical_features) > 0:
+            X[self.numerical_features] = self.scaler.transform(
+                X[self.numerical_features]
             )
-        
-        return X_transformed
-    
-    def _fit_categorical(self, X_cat: pd.DataFrame) -> None:
-        """Fit categorical feature preprocessing"""
-        # Missing value imputation
-        self.categorical_imputer = SimpleImputer(strategy='most_frequent')
-        X_imputed = self.categorical_imputer.fit_transform(X_cat)
-        
-        # Encoding
-        encoding_type = self.config['data']['categorical_encoding']
-        if encoding_type == 'ordinal':
-            self.categorical_encoder = OrdinalEncoder(
-                handle_unknown='use_encoded_value',
-                unknown_value=-1
+
+        # Transform target
+        if self.target_encoder is not None:
+            y = y.astype(str).apply(
+                lambda x: x if x in self.target_encoder.classes_ else self.target_encoder.classes_[0]
             )
-        elif encoding_type == 'onehot':
-            self.categorical_encoder = OneHotEncoder(
-                handle_unknown='ignore',
-                sparse=False
-            )
-        
-        self.categorical_encoder.fit(X_imputed)
-        
-        logger.info(f"Fitted categorical preprocessing: {len(self.categorical_features)} features")
-    
-    def _transform_categorical(self, X_cat: pd.DataFrame) -> pd.DataFrame:
-        """Transform categorical features"""
-        # Impute
-        X_imputed = self.categorical_imputer.transform(X_cat)
-        
-        # Encode
-        X_encoded = self.categorical_encoder.transform(X_imputed)
-        
-        # Create dataframe
-        if self.config['data']['categorical_encoding'] == 'onehot':
-            # OneHot creates multiple columns
-            feature_names = self.categorical_encoder.get_feature_names_out(X_cat.columns)
-            X_transformed = pd.DataFrame(
-                X_encoded,
-                columns=feature_names,
-                index=X_cat.index
-            )
+            y = self.target_encoder.transform(y)
         else:
-            # Ordinal keeps same columns
-            X_transformed = pd.DataFrame(
-                X_encoded,
-                columns=X_cat.columns,
-                index=X_cat.index
-            )
-        
-        return X_transformed
-    
-    def _compute_feature_stats(self, X: pd.DataFrame, y: pd.Series) -> None:
-        """Compute and store feature statistics"""
+            y = y.values
+
+        # Convert to numpy array
+        X = X[self.feature_names].values
+
+        return X, y
+
+    def _compute_statistics(self, X: pd.DataFrame, y: np.ndarray):
+        """Compute feature statistics"""
         self.feature_stats = {
-            'n_samples': len(X),
-            'n_features': len(X.columns),
+            'n_features': len(self.feature_names),
             'n_numerical': len(self.numerical_features),
-            'n_categorical': len(self.categorical_features),
-            'class_distribution': y.value_counts().to_dict(),
-            'class_weights': self._compute_class_weights(y),
+            'n_categorical': len(self.original_categorical_features),
+            'categorical_cardinalities': self.categorical_cardinalities,
+            'feature_names': self.feature_names,
         }
-        
-        # Numerical feature stats
-        if self.numerical_features:
-            self.feature_stats['numerical_stats'] = {
-                'mean': X[self.numerical_features].mean().to_dict(),
-                'std': X[self.numerical_features].std().to_dict(),
-                'missing_rate': X[self.numerical_features].isnull().mean().to_dict(),
-            }
-        
-        # Categorical feature stats
-        if self.categorical_features:
-            self.feature_stats['categorical_stats'] = {
-                feat: {
-                    'n_unique': X[feat].nunique(),
-                    'top_values': X[feat].value_counts().head(10).to_dict(),
-                    'missing_rate': X[feat].isnull().mean(),
-                }
-                for feat in self.categorical_features
-            }
-    
-    def _compute_class_weights(self, y: pd.Series) -> Dict[int, float]:
-        """Compute class weights for imbalanced data"""
-        class_counts = y.value_counts()
-        n_samples = len(y)
-        n_classes = len(class_counts)
-        
-        weights = {}
-        for cls, count in class_counts.items():
-            weights[cls] = n_samples / (n_classes * count)
-        
-        return weights
-    
-    def get_feature_names(self) -> List[str]:
-        """Get all feature names after transformation"""
-        if not self.is_fitted:
-            raise ValueError("Preprocessor must be fitted first")
-        
-        feature_names = []
-        
-        # Numerical features
-        feature_names.extend(self.numerical_features)
-        
-        # Categorical features
-        if self.config['data']['categorical_encoding'] == 'onehot':
-            feature_names.extend(
-                self.categorical_encoder.get_feature_names_out(self.categorical_features)
-            )
+
+        # Class distribution
+        unique, counts = np.unique(y, return_counts=True)
+        if self.target_encoder is not None:
+            class_names = self.target_encoder.inverse_transform(unique)
+            self.feature_stats['class_distribution'] = dict(zip(class_names, counts))
         else:
-            feature_names.extend(self.categorical_features)
-        
-        return feature_names
-    
-    def save(self, path: str) -> None:
-        """Save preprocessor to disk"""
+            self.feature_stats['class_distribution'] = dict(zip(unique, counts))
+
+    def get_feature_names(self) -> list:
+        """Get feature names"""
+        return self.feature_names
+
+    def get_categorical_cardinalities(self) -> list:
+        """Get cardinalities of categorical features"""
+        return self.categorical_cardinalities
+
+    def inverse_transform_target(self, y: np.ndarray) -> np.ndarray:
+        """Inverse transform target labels"""
+        if self.target_encoder is not None:
+            return self.target_encoder.inverse_transform(y)
+        return y
+
+    def save(self, path: str):
+        """Save preprocessor"""
         with open(path, 'wb') as f:
-            pickle.dump({
-                'config': self.config,
-                'numerical_imputer': self.numerical_imputer,
-                'categorical_imputer': self.categorical_imputer,
-                'numerical_scaler': self.numerical_scaler,
-                'categorical_encoder': self.categorical_encoder,
-                'label_encoder': self.label_encoder,
-                'feature_stats': self.feature_stats,
-                'is_fitted': self.is_fitted,
-            }, f)
+            pickle.dump(self, f)
         logger.info(f"Preprocessor saved to {path}")
-    
-    @classmethod
-    def load(cls, path: str) -> 'DataPreprocessor':
-        """Load preprocessor from disk"""
+
+    @staticmethod
+    def load(path: str) -> 'DataPreprocessor':
+        """Load preprocessor"""
         with open(path, 'rb') as f:
-            data = pickle.load(f)
-        
-        preprocessor = cls(data['config'])
-        preprocessor.numerical_imputer = data['numerical_imputer']
-        preprocessor.categorical_imputer = data['categorical_imputer']
-        preprocessor.numerical_scaler = data['numerical_scaler']
-        preprocessor.categorical_encoder = data['categorical_encoder']
-        preprocessor.label_encoder = data['label_encoder']
-        preprocessor.feature_stats = data['feature_stats']
-        preprocessor.is_fitted = data['is_fitted']
-        
+            preprocessor = pickle.load(f)
         logger.info(f"Preprocessor loaded from {path}")
         return preprocessor
-
 
 class FeatureEngineer:
     """
