@@ -218,7 +218,7 @@ def create_datasets(
         tree_features_train,
         numerical_indices,
         categorical_indices,
-        path_encoder.get_vocab_size() if path_encoder else 0,
+        # path_encoder.get_vocab_size() if path_encoder else 0,
     )
     
     val_dataset = TreeEnhancedDataset(
@@ -227,24 +227,18 @@ def create_datasets(
     )
     
     test_dataset = None
+
     if X_test is not None:
-        # Extract tree features for test set
-        if path_encoder is not None:
-            # This would require the tree model - simplified here
-            tree_features_test = {
-                'cross_features': np.zeros((len(X_test), tree_features_train['cross_features'].shape[1])),
-                'path_tokens': np.zeros((len(X_test), tree_features_train['path_tokens'].shape[1]), dtype=np.int32),
-                'path_lengths': np.zeros(len(X_test), dtype=np.int32),
-                'leaf_indices': np.zeros((len(X_test), tree_features_train['leaf_indices'].shape[1], 2), dtype=np.int32),
-            }
-        else:
-            tree_features_test = None
-        
+        logger.warning("Test set tree feature extraction not implemented yet")
+
         test_dataset = TreeEnhancedDataset(
-            X_test, y_test, tree_features_test,
-            numerical_indices, categorical_indices,
+            X_test,
+            y_test,
+            None,  # ⚠️ 暂时传 None，需要实现
+            numerical_indices,
+            categorical_indices,
         )
-    
+
     # Create sampler if needed
     sampler = None
     if config['data']['sampling_strategy'] == 'class_balanced':
